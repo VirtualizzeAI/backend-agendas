@@ -1,6 +1,6 @@
 # Backend separado (SaaS) - Minha Agenda
 
-Este backend foi criado para deploy independente do frontend, usando Supabase como banco + auth.
+Este backend foi criado para deploy independente do frontend, usando Supabase como banco + auth no schema `public`.
 
 ## 1) Instalar dependencias
 
@@ -23,8 +23,6 @@ Copie `.env.example` para `.env` e preencha:
 No SQL Editor do Supabase, execute:
 
 - `sql/0001_init_saas.sql`
-
-Depois, em `Project Settings -> API -> Exposed schemas`, inclua o schema `app`.
 
 Este script cria:
 - tabelas multi-tenant
@@ -51,6 +49,25 @@ Bootstrap autenticado:
 Criar tenant autenticado:
 
 - `POST /v1/tenants`
+
+Rotas admin:
+
+- `GET /v1/admin/bootstrap`
+- `GET /v1/admin/plans`
+- `POST /v1/admin/plans`
+- `GET /v1/admin/customers`
+- `POST /v1/admin/customers`
+
+Rotas operacionais SaaS:
+
+- `GET /v1/clients?tenantId=UUID`
+- `POST /v1/clients`
+- `GET /v1/professionals?tenantId=UUID`
+- `POST /v1/professionals`
+- `GET /v1/services?tenantId=UUID`
+- `POST /v1/services`
+- `GET /v1/appointments?tenantId=UUID`
+- `POST /v1/appointments`
 
 ## 5) Deploy separado
 

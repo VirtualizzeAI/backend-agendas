@@ -13,7 +13,6 @@ export async function bootstrapRoutes(app: FastifyInstance) {
       const { user, supabase } = await requireUserFromRequest(request);
 
       const { data: memberships, error } = await supabase
-        .schema('app')
         .from('tenant_users')
         .select('tenant_id, role, tenants(id, name, slug, plan, active)')
         .order('created_at', { ascending: true });

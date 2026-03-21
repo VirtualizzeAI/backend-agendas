@@ -3,6 +3,9 @@ import cors from '@fastify/cors';
 import { env } from './config/env.js';
 import { healthRoutes } from './routes/health.js';
 import { bootstrapRoutes } from './routes/bootstrap.js';
+import { adminRoutes } from './routes/admin.js';
+import { catalogRoutes } from './routes/catalog.js';
+import { appointmentRoutes } from './routes/appointments.js';
 
 async function buildServer() {
   const app = Fastify({ logger: true });
@@ -14,6 +17,9 @@ async function buildServer() {
 
   await app.register(healthRoutes);
   await app.register(bootstrapRoutes);
+  await app.register(adminRoutes);
+  await app.register(catalogRoutes);
+  await app.register(appointmentRoutes);
 
   return app;
 }
