@@ -6,6 +6,7 @@ import { bootstrapRoutes } from './routes/bootstrap.js';
 import { adminRoutes } from './routes/admin.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { appointmentRoutes } from './routes/appointments.js';
+import { commerceRoutes } from './routes/commerce.js';
 
 async function buildServer() {
   const app = Fastify({ logger: true });
@@ -20,6 +21,7 @@ async function buildServer() {
   await app.register(adminRoutes);
   await app.register(catalogRoutes);
   await app.register(appointmentRoutes);
+  await app.register(commerceRoutes);
 
   return app;
 }
