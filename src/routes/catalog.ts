@@ -34,9 +34,26 @@ const createServiceSchema = z.object({
   description: z.string().optional().nullable(),
 });
 
+const scheduleSlotSchema = z.object({
+  weekday: z.number().int().min(0).max(6),
+  start_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  end_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+});
+
+const saveProfessionalSchedulesSchema = z.object({
+  tenant_id: z.uuid(),
+  slot_interval_minutes: z.number().int().min(1).max(1440).default(30),
+  schedules: z.array(scheduleSlotSchema).default([]),
+});
+
 const updateClientSchema = createClientSchema.partial().omit({ tenant_id: true });
 const updateProfessionalSchema = createProfessionalSchema.partial().omit({ tenant_id: true });
 const updateServiceSchema = createServiceSchema.partial().omit({ tenant_id: true });
+
+function toMinute(time: string): number {
+  const [h, m] = time.split(':');
+  return Number(h) * 60 + Number(m);
+}
 
 export async function catalogRoutes(app: FastifyInstance) {
   app.get('/v1/clients', async (request, reply) => {
@@ -249,6 +266,143 @@ export async function catalogRoutes(app: FastifyInstance) {
     }
 
     return reply.code(204).send();
+  });
+
+  // ── Professional schedules (weekly windows) ───────────────────────────────
+  app.get('/v1/professionals/:id/schedules', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const { id } = request.params as { id: string };
+    const { supabase } = auth;
+
+    const { data, error } = await supabase
+      .from('professional_schedules')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('professional_id', id)
+      .order('weekday', { ascending: true })
+      .order('start_time', { ascending: true });
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(500).send({ message: error.message });
+    }
+
+    const { data: settings, error: settingsError } = await supabase
+      .from('professional_schedule_settings')
+      .select('slot_interval_minutes')
+      .eq('tenant_id', tenantId)
+      .eq('professional_id', id)
+      .maybeSingle();
+
+    if (settingsError) {
+      request.log.error(settingsError);
+      return reply.code(500).send({ message: settingsError.message });
+    }
+
+    return {
+      slot_interval_minutes: settings?.slot_interval_minutes ?? 30,
+      records: data ?? [],
+    };
+  });
+
+  app.put('/v1/professionals/:id/schedules', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const { id } = request.params as { id: string };
+    const payload = saveProfessionalSchedulesSchema.safeParse(request.body ?? {});
+    if (!payload.success) {
+      return reply.code(400).send({ message: 'Payload invalido', issues: payload.error.issues });
+    }
+
+    const invalid = payload.data.schedules.find((s) => toMinute(s.end_time) <= toMinute(s.start_time));
+    if (invalid) {
+      return reply.code(400).send({ message: 'Horario final deve ser maior que inicial em todos os turnos' });
+    }
+
+    const { supabase } = auth;
+
+    const { data: prof, error: profError } = await supabase
+      .from('professionals')
+      .select('id')
+      .eq('id', id)
+      .eq('tenant_id', payload.data.tenant_id)
+      .maybeSingle();
+
+    if (profError) {
+      request.log.error(profError);
+      return reply.code(500).send({ message: profError.message });
+    }
+
+    if (!prof) {
+      return reply.code(404).send({ message: 'Profissional nao encontrado para este tenant' });
+    }
+
+    const { error: deleteError } = await supabase
+      .from('professional_schedules')
+      .delete()
+      .eq('tenant_id', payload.data.tenant_id)
+      .eq('professional_id', id);
+
+    if (deleteError) {
+      request.log.error(deleteError);
+      return reply.code(500).send({ message: deleteError.message });
+    }
+
+    const { error: settingsUpsertError } = await supabase
+      .from('professional_schedule_settings')
+      .upsert(
+        {
+          tenant_id: payload.data.tenant_id,
+          professional_id: id,
+          slot_interval_minutes: payload.data.slot_interval_minutes,
+        },
+        { onConflict: 'professional_id' },
+      );
+
+    if (settingsUpsertError) {
+      request.log.error(settingsUpsertError);
+      return reply.code(500).send({ message: settingsUpsertError.message });
+    }
+
+    if (payload.data.schedules.length > 0) {
+      const rows = payload.data.schedules.map((slot) => ({
+        tenant_id: payload.data.tenant_id,
+        professional_id: id,
+        weekday: slot.weekday,
+        start_time: slot.start_time,
+        end_time: slot.end_time,
+      }));
+
+      const { error: insertError } = await supabase.from('professional_schedules').insert(rows);
+      if (insertError) {
+        request.log.error(insertError);
+        return reply.code(400).send({ message: insertError.message });
+      }
+    }
+
+    const { data: updatedRows, error: listError } = await supabase
+      .from('professional_schedules')
+      .select('*')
+      .eq('tenant_id', payload.data.tenant_id)
+      .eq('professional_id', id)
+      .order('weekday', { ascending: true })
+      .order('start_time', { ascending: true });
+
+    if (listError) {
+      request.log.error(listError);
+      return reply.code(500).send({ message: listError.message });
+    }
+
+    return {
+      slot_interval_minutes: payload.data.slot_interval_minutes,
+      records: updatedRows ?? [],
+    };
   });
 
   // ── Services PUT/DELETE ────────────────────────────────────────────────────

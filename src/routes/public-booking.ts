@@ -23,9 +23,14 @@ const createPublicAppointmentSchema = z.object({
   startAt: z.iso.datetime(),
   clientName: z.string().min(2),
   clientPhone: z.string().min(8),
-  clientCpf: z.string().optional().nullable(),
+  clientCpf: z.string().min(1),
   notes: z.string().optional().nullable(),
 });
+
+function parseTimeToMinutes(time: string): number {
+  const parts = time.split(':');
+  return parseInt(parts[0] ?? '0', 10) * 60 + parseInt(parts[1] ?? '0', 10);
+}
 
 function randomSlug(size = 20) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -40,6 +45,10 @@ function randomSlug(size = 20) {
 function toMinuteOfDay(dateIso: string): number {
   const d = new Date(dateIso);
   return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+function getWeekdayFromDate(date: string): number {
+  return new Date(`${date}T00:00:00.000Z`).getUTCDay();
 }
 
 function normalizeDigits(value?: string | null): string | null {
@@ -143,7 +152,7 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     const [{ data: tenant, error: tenantError }, { data: professionals, error: professionalsError }, { data: services, error: servicesError }] = await Promise.all([
       supabaseAdmin
         .from('tenants')
-        .select('id, name')
+        .select('id, name, booking_start_time, booking_end_time')
         .eq('id', link.tenant_id)
         .single(),
       supabaseAdmin
@@ -165,10 +174,13 @@ export async function publicBookingRoutes(app: FastifyInstance) {
       return reply.code(500).send({ message: (tenantError ?? professionalsError ?? servicesError)?.message });
     }
 
+    const tenantTyped = tenant as { id: string; name: string; booking_start_time?: string | null; booking_end_time?: string | null };
     return {
       tenant: {
-        id: tenant.id,
-        name: tenant.name,
+        id: tenantTyped.id,
+        name: tenantTyped.name,
+        bookingStartTime: tenantTyped.booking_start_time ?? '08:00',
+        bookingEndTime: tenantTyped.booking_end_time ?? '18:00',
       },
       professionals: professionals ?? [],
       services: services ?? [],
@@ -198,6 +210,19 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     if (!link) {
       return reply.code(404).send({ message: 'Link de agendamento nao encontrado' });
     }
+
+    const { data: tenantSchedule, error: tenantScheduleError } = await supabaseAdmin
+      .from('tenants')
+      .select('booking_start_time, booking_end_time')
+      .eq('id', link.tenant_id)
+      .maybeSingle();
+
+    if (tenantScheduleError) {
+      request.log.error(tenantScheduleError);
+      return reply.code(500).send({ message: tenantScheduleError.message });
+    }
+
+    const schedule = tenantSchedule as { booking_start_time?: string | null; booking_end_time?: string | null } | null;
 
     const { date, professionalId } = parsed.data;
     const queryServiceIds = parsed.data.serviceIds;
@@ -242,9 +267,43 @@ export async function publicBookingRoutes(app: FastifyInstance) {
       return reply.code(500).send({ message: apptError.message });
     }
 
-    const slotStartMinutes = 8 * 60;
-    const slotEndMinutes = 19 * 60;
-    const step = 30;
+    const weekday = getWeekdayFromDate(date);
+    const { data: scheduleRows, error: scheduleError } = await supabaseAdmin
+      .from('professional_schedules')
+      .select('start_time, end_time')
+      .eq('tenant_id', link.tenant_id)
+      .eq('professional_id', professionalId)
+      .eq('weekday', weekday)
+      .order('start_time', { ascending: true });
+
+    if (scheduleError) {
+      request.log.error(scheduleError);
+      return reply.code(500).send({ message: scheduleError.message });
+    }
+
+    const { data: scheduleSettings, error: scheduleSettingsError } = await supabaseAdmin
+      .from('professional_schedule_settings')
+      .select('slot_interval_minutes')
+      .eq('tenant_id', link.tenant_id)
+      .eq('professional_id', professionalId)
+      .maybeSingle();
+
+    if (scheduleSettingsError) {
+      request.log.error(scheduleSettingsError);
+      return reply.code(500).send({ message: scheduleSettingsError.message });
+    }
+
+    const timeWindows = (scheduleRows && scheduleRows.length > 0)
+      ? scheduleRows.map((row) => ({
+        start: parseTimeToMinutes(row.start_time),
+        end: parseTimeToMinutes(row.end_time),
+      }))
+      : [{
+        start: parseTimeToMinutes(schedule?.booking_start_time ?? '08:00'),
+        end: parseTimeToMinutes(schedule?.booking_end_time ?? '18:00'),
+      }];
+
+    const step = scheduleSettings?.slot_interval_minutes ?? 30;
 
     const occupied = (appointments ?? []).map((item) => ({
       start: toMinuteOfDay(item.start_at),
@@ -252,15 +311,21 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     }));
 
     const slots: Array<{ value: string; label: string }> = [];
+    const seen = new Set<string>();
 
-    for (let start = slotStartMinutes; start + resolvedServiceDurationMinutes <= slotEndMinutes; start += step) {
-      const end = start + resolvedServiceDurationMinutes;
-      const hasConflict = occupied.some((o) => start < o.end && end > o.start);
-      if (hasConflict) continue;
+    for (const window of timeWindows) {
+      for (let start = window.start; start + resolvedServiceDurationMinutes <= window.end; start += step) {
+        const end = start + resolvedServiceDurationMinutes;
+        const hasConflict = occupied.some((o) => start < o.end && end > o.start);
+        if (hasConflict) continue;
 
-      const h = String(Math.floor(start / 60)).padStart(2, '0');
-      const m = String(start % 60).padStart(2, '0');
-      slots.push({ value: `${h}:${m}`, label: `${h}:${m}` });
+        const h = String(Math.floor(start / 60)).padStart(2, '0');
+        const m = String(start % 60).padStart(2, '0');
+        const value = `${h}:${m}`;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        slots.push({ value, label: value });
+      }
     }
 
     return { date, slots };
