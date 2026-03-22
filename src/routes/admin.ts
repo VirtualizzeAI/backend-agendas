@@ -4,6 +4,11 @@ import { z } from 'zod';
 import { requireAuthenticatedClient } from '../lib/request.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
+interface AuthUserRow {
+  id: string;
+  email: string | null;
+}
+
 const createPlanSchema = z.object({
   name: z.string().min(2),
   price: z.number().positive(),
@@ -182,6 +187,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const { name, plan_id, due_date, contact, saas_email, saas_password } = payload.data;
 
+    let saasUserId = '';
+    let createdNewAuthUser = false;
+
     const createdAuth = await supabaseAdmin.auth.admin.createUser({
       email: saas_email,
       password: saas_password,
@@ -191,11 +199,49 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
 
-    if (createdAuth.error || !createdAuth.data.user) {
-      return reply.code(400).send({ message: createdAuth.error?.message ?? 'Nao foi possivel criar usuario SaaS' });
+    if (createdAuth.data.user) {
+      saasUserId = createdAuth.data.user.id;
+      createdNewAuthUser = true;
+    } else if (createdAuth.error?.message.toLowerCase().includes('already been registered')) {
+      const { data: existingAuthUsers, error: existingAuthUsersError } = await supabaseAdmin
+        .schema('auth')
+        .from('users')
+        .select('id, email')
+        .eq('email', saas_email)
+        .limit(1);
+
+      if (existingAuthUsersError) {
+        request.log.error(existingAuthUsersError);
+        return reply.code(400).send({ message: existingAuthUsersError.message });
+      }
+
+      const existingAuthUser = (existingAuthUsers?.[0] ?? null) as AuthUserRow | null;
+      if (!existingAuthUser) {
+        return reply.code(400).send({ message: 'Nao foi possivel localizar o usuario SaaS existente' });
+      }
+
+      saasUserId = existingAuthUser.id;
+    } else if (createdAuth.error) {
+      return reply.code(400).send({ message: createdAuth.error.message });
     }
 
-    const saasUserId = createdAuth.data.user.id;
+    const { data: existingCustomersByAuth, error: existingCustomersError } = await supabase
+      .from('admin_customers')
+      .select('id')
+      .or(`saas_email.eq.${saas_email},saas_user_id.eq.${saasUserId}`)
+      .limit(1);
+
+    if (existingCustomersError) {
+      if (createdNewAuthUser) {
+        await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      }
+      request.log.error(existingCustomersError);
+      return reply.code(400).send({ message: existingCustomersError.message });
+    }
+
+    if ((existingCustomersByAuth?.length ?? 0) > 0) {
+      return reply.code(400).send({ message: 'Ja existe cliente vinculado a este e-mail SaaS' });
+    }
     const tenantSlug = `${slugifyTenantName(name)}-${Math.random().toString(36).slice(2, 7)}`;
 
     const { data: createdTenant, error: tenantError } = await supabaseAdmin
@@ -209,7 +255,9 @@ export async function adminRoutes(app: FastifyInstance) {
       .single();
 
     if (tenantError || !createdTenant) {
-      await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      if (createdNewAuthUser) {
+        await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      }
       request.log.error(tenantError);
       return reply.code(400).send({ message: tenantError?.message ?? 'Nao foi possivel criar tenant SaaS' });
     }
@@ -224,7 +272,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     if (membershipError) {
       await supabaseAdmin.from('tenants').delete().eq('id', createdTenant.id);
-      await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      if (createdNewAuthUser) {
+        await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      }
       request.log.error(membershipError);
       return reply.code(400).send({ message: membershipError.message });
     }
@@ -246,7 +296,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (error) {
       await supabaseAdmin.from('tenant_users').delete().eq('tenant_id', createdTenant.id).eq('user_id', saasUserId);
       await supabaseAdmin.from('tenants').delete().eq('id', createdTenant.id);
-      await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      if (createdNewAuthUser) {
+        await supabaseAdmin.auth.admin.deleteUser(saasUserId);
+      }
       request.log.error(error);
       return reply.code(400).send({ message: error.message });
     }
