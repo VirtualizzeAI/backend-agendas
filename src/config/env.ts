@@ -11,4 +11,15 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('*'),
 });
 
-export const env = envSchema.parse(process.env);
+const parsedEnv = envSchema.parse(process.env);
+
+export const env = {
+  ...parsedEnv,
+  CORS_ORIGINS:
+    parsedEnv.CORS_ORIGIN === '*'
+      ? '*'
+      : parsedEnv.CORS_ORIGIN
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+};

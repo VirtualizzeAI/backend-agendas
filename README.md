@@ -16,7 +16,11 @@ Copie `.env.example` para `.env` e preencha:
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `CORS_ORIGIN`
+- `CORS_ORIGIN` (aceita um ou varios origins separados por virgula)
+
+Exemplo local:
+
+`CORS_ORIGIN=http://localhost:5173,http://localhost:5174`
 
 ## 3) Criar schema no Supabase
 
@@ -57,6 +61,8 @@ Rotas admin:
 - `POST /v1/admin/plans`
 - `GET /v1/admin/customers`
 - `POST /v1/admin/customers`
+- `PUT /v1/admin/customers/:id`
+- `POST /v1/admin/customers/:id/send-password-reset`
 
 Rotas operacionais SaaS:
 
