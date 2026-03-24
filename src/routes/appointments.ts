@@ -1,6 +1,8 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getTenantIdFromQuery, requireAuthenticatedClient } from '../lib/request.js';
+import { supabaseAdmin } from '../lib/supabase.js';
+import { sendAppointmentCreatedWhatsapp } from '../lib/whatsapp.js';
 
 const createAppointmentSchema = z.object({
   tenant_id: z.uuid(),
@@ -83,6 +85,31 @@ export async function appointmentRoutes(app: FastifyInstance) {
       request.log.error(error);
       return reply.code(400).send({ message: error.message });
     }
+
+    let clientPhone: string | null = null;
+    if (payload.data.client_id) {
+      const { data: clientRow } = await supabaseAdmin
+        .from('clients')
+        .select('phone')
+        .eq('id', payload.data.client_id)
+        .eq('tenant_id', payload.data.tenant_id)
+        .maybeSingle();
+
+      clientPhone = (clientRow as { phone?: string | null } | null)?.phone ?? null;
+    }
+
+    await sendAppointmentCreatedWhatsapp(
+      {
+        tenantId: payload.data.tenant_id,
+        clientName: payload.data.client_name,
+        clientPhone,
+        serviceName: payload.data.service_name,
+        startAtIso: data.start_at,
+        endAtIso: data.end_at,
+        professionalId: payload.data.professional_id,
+      },
+      request.log,
+    );
 
     return reply.code(201).send(data);
   });

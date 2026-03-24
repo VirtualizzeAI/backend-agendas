@@ -43,6 +43,7 @@ const scheduleSlotSchema = z.object({
 const saveProfessionalSchedulesSchema = z.object({
   tenant_id: z.uuid(),
   slot_interval_minutes: z.number().int().min(1).max(1440).default(30),
+  min_booking_notice_minutes: z.number().int().min(0).max(43200).default(0),
   schedules: z.array(scheduleSlotSchema).default([]),
 });
 
@@ -294,7 +295,7 @@ export async function catalogRoutes(app: FastifyInstance) {
 
     const { data: settings, error: settingsError } = await supabase
       .from('professional_schedule_settings')
-      .select('slot_interval_minutes')
+      .select('slot_interval_minutes, min_booking_notice_minutes')
       .eq('tenant_id', tenantId)
       .eq('professional_id', id)
       .maybeSingle();
@@ -306,6 +307,7 @@ export async function catalogRoutes(app: FastifyInstance) {
 
     return {
       slot_interval_minutes: settings?.slot_interval_minutes ?? 30,
+      min_booking_notice_minutes: settings?.min_booking_notice_minutes ?? 0,
       records: data ?? [],
     };
   });
@@ -361,6 +363,7 @@ export async function catalogRoutes(app: FastifyInstance) {
           tenant_id: payload.data.tenant_id,
           professional_id: id,
           slot_interval_minutes: payload.data.slot_interval_minutes,
+          min_booking_notice_minutes: payload.data.min_booking_notice_minutes,
         },
         { onConflict: 'professional_id' },
       );
@@ -401,6 +404,7 @@ export async function catalogRoutes(app: FastifyInstance) {
 
     return {
       slot_interval_minutes: payload.data.slot_interval_minutes,
+      min_booking_notice_minutes: payload.data.min_booking_notice_minutes,
       records: updatedRows ?? [],
     };
   });

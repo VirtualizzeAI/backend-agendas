@@ -8,6 +8,7 @@ import { catalogRoutes } from './routes/catalog.js';
 import { appointmentRoutes } from './routes/appointments.js';
 import { commerceRoutes } from './routes/commerce.js';
 import { publicBookingRoutes } from './routes/public-booking.js';
+import { whatsappRoutes } from './routes/whatsapp.js';
 
 async function buildServer() {
   const app = Fastify({ logger: true });
@@ -36,6 +37,7 @@ async function buildServer() {
   await app.register(appointmentRoutes);
   await app.register(commerceRoutes);
   await app.register(publicBookingRoutes);
+  await app.register(whatsappRoutes);
 
   return app;
 }

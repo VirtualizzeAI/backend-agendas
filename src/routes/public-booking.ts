@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getTenantIdFromQuery, requireAuthenticatedClient } from '../lib/request.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { sendAppointmentCreatedWhatsapp } from '../lib/whatsapp.js';
 
 const slotQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -45,6 +46,22 @@ function randomSlug(size = 20) {
 function toMinuteOfDay(dateIso: string): number {
   const d = new Date(dateIso);
   return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+function parseLocalDate(date: string): Date {
+  const [yearRaw, monthRaw, dayRaw] = date.split('-').map((value) => Number(value));
+  const year = Number.isFinite(yearRaw) ? yearRaw : 1970;
+  const month = Number.isFinite(monthRaw) ? monthRaw : 1;
+  const day = Number.isFinite(dayRaw) ? dayRaw : 1;
+  return new Date(year, month - 1, day, 0, 0, 0, 0);
+}
+
+function minutesUntilSlot(date: string, minuteOfDay: number, now: Date): number {
+  const slotDate = parseLocalDate(date);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const dayDiff = Math.round((slotDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+  const nowMinuteOfDay = now.getHours() * 60 + now.getMinutes();
+  return dayDiff * 1440 + minuteOfDay - nowMinuteOfDay;
 }
 
 function getWeekdayFromDate(date: string): number {
@@ -283,7 +300,7 @@ export async function publicBookingRoutes(app: FastifyInstance) {
 
     const { data: scheduleSettings, error: scheduleSettingsError } = await supabaseAdmin
       .from('professional_schedule_settings')
-      .select('slot_interval_minutes')
+      .select('slot_interval_minutes, min_booking_notice_minutes')
       .eq('tenant_id', link.tenant_id)
       .eq('professional_id', professionalId)
       .maybeSingle();
@@ -304,6 +321,8 @@ export async function publicBookingRoutes(app: FastifyInstance) {
       }];
 
     const step = scheduleSettings?.slot_interval_minutes ?? 30;
+    const minBookingNoticeMinutes = scheduleSettings?.min_booking_notice_minutes ?? 0;
+    const nowRef = new Date();
 
     const occupied = (appointments ?? []).map((item) => ({
       start: toMinuteOfDay(item.start_at),
@@ -316,6 +335,11 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     for (const window of timeWindows) {
       for (let start = window.start; start + resolvedServiceDurationMinutes <= window.end; start += step) {
         const end = start + resolvedServiceDurationMinutes;
+        if (minBookingNoticeMinutes > 0) {
+          const minutesToSlot = minutesUntilSlot(date, start, nowRef);
+          if (minutesToSlot < minBookingNoticeMinutes) continue;
+        }
+
         const hasConflict = occupied.some((o) => start < o.end && end > o.start);
         if (hasConflict) continue;
 
@@ -386,6 +410,26 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     const startDate = new Date(payload.startAt);
     if (Number.isNaN(startDate.getTime())) {
       return reply.code(400).send({ message: 'Horario inicial invalido' });
+    }
+
+    const { data: scheduleSettings, error: scheduleSettingsError } = await supabaseAdmin
+      .from('professional_schedule_settings')
+      .select('min_booking_notice_minutes')
+      .eq('tenant_id', link.tenant_id)
+      .eq('professional_id', payload.professionalId)
+      .maybeSingle();
+
+    if (scheduleSettingsError) {
+      request.log.error(scheduleSettingsError);
+      return reply.code(500).send({ message: scheduleSettingsError.message });
+    }
+
+    const minBookingNoticeMinutes = scheduleSettings?.min_booking_notice_minutes ?? 0;
+    const earliestAllowedTimestamp = Date.now() + (minBookingNoticeMinutes * 60 * 1000);
+    if (startDate.getTime() < earliestAllowedTimestamp) {
+      return reply.code(409).send({
+        message: `Este horario exige antecedencia minima de ${minBookingNoticeMinutes} minutos. Escolha outro horario.`,
+      });
     }
 
     const endDate = new Date(startDate.getTime() + totalDurationMinutes * 60 * 1000);
@@ -493,6 +537,19 @@ export async function publicBookingRoutes(app: FastifyInstance) {
       request.log.error(createAppointmentError);
       return reply.code(400).send({ message: createAppointmentError?.message ?? 'Erro ao criar agendamento' });
     }
+
+    await sendAppointmentCreatedWhatsapp(
+      {
+        tenantId: link.tenant_id,
+        clientName: payload.clientName.trim(),
+        clientPhone: phoneDigits ?? payload.clientPhone,
+        serviceName: serviceSummary,
+        startAtIso: createdAppointment.start_at,
+        endAtIso: createdAppointment.end_at,
+        professionalId: payload.professionalId,
+      },
+      request.log,
+    );
 
     return reply.code(201).send({
       appointmentId: createdAppointment.id,
