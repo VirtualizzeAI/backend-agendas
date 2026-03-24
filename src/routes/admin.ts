@@ -9,6 +9,12 @@ interface AuthUserRow {
   email: string | null;
 }
 
+interface AdminPlanLookupRow {
+  id: string;
+  name: string;
+  price: number;
+}
+
 const createPlanSchema = z.object({
   name: z.string().min(2),
   price: z.number().positive(),
@@ -187,6 +193,23 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const { name, plan_id, due_date, contact, saas_email, saas_password } = payload.data;
 
+    const { data: selectedPlan, error: selectedPlanError } = await supabase
+      .from('admin_plans')
+      .select('id, name, price')
+      .eq('id', plan_id)
+      .maybeSingle();
+
+    if (selectedPlanError) {
+      request.log.error(selectedPlanError);
+      return reply.code(400).send({ message: selectedPlanError.message });
+    }
+
+    if (!selectedPlan) {
+      return reply.code(400).send({ message: 'Plano selecionado nao encontrado' });
+    }
+
+    const planRow = selectedPlan as AdminPlanLookupRow;
+
     let saasUserId = '';
     let createdNewAuthUser = false;
 
@@ -249,6 +272,11 @@ export async function adminRoutes(app: FastifyInstance) {
       .insert({
         name,
         slug: tenantSlug,
+        plan: planRow.name,
+        plan_price: Number(planRow.price),
+        due_date,
+        contract_date: new Date().toISOString().slice(0, 10),
+        contact,
         owner_user_id: saasUserId,
       })
       .select('id')
