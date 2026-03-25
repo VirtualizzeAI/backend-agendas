@@ -9,8 +9,8 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   CORS_ORIGIN: z.string().default('*'),
-  WUZAPI_BASE_URL: z.string().url().optional(),
-  WUZAPI_TOKEN: z.string().min(1).optional(),
+  EVOLUTION_API_BASE_URL: z.string().url().optional(),
+  EVOLUTION_API_KEY: z.string().min(1).optional(),
 });
 
 const parsedEnv = envSchema.parse(process.env);

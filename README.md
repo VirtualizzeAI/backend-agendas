@@ -17,8 +17,8 @@ Copie `.env.example` para `.env` e preencha:
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `CORS_ORIGIN` (aceita um ou varios origins separados por virgula)
-- `WUZAPI_BASE_URL` (url interna do provedor WuzAPI do SaaS)
-- `WUZAPI_TOKEN` (token interno do SaaS para a WuzAPI)
+- `EVOLUTION_API_BASE_URL` (url interna da Evolution API do SaaS)
+- `EVOLUTION_API_KEY` (apikey interna do SaaS para a Evolution API)
 
 Exemplo local:
 
@@ -80,7 +80,7 @@ Rotas operacionais SaaS:
 - `PUT /v1/whatsapp/config?tenantId=UUID`
 - `GET /v1/whatsapp/session/status?tenantId=UUID`
 - `POST /v1/whatsapp/session/connect?tenantId=UUID`
-- `GET /v1/whatsapp/session/qr?tenantId=UUID`
+- `POST /v1/whatsapp/session/sync?tenantId=UUID`
 
 ## 5) Deploy separado
 

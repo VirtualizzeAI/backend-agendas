@@ -45,8 +45,12 @@ function withBrazilCountryCode(value?: string | null): string | null {
   return `55${digits}`;
 }
 
-function normalizeWuzapiBaseUrl(baseUrl: string): string {
+function normalizeEvolutionBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '');
+}
+
+function getInstanceName(tenantId: string): string {
+  return `markei_${tenantId.replace(/-/g, '')}`;
 }
 
 function formatDatePtBr(iso: string): string {
@@ -72,9 +76,7 @@ function formatTimePtBr(iso: string): string {
 }
 
 function renderTemplate(template: string, variables: Record<string, string>): string {
-  return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, rawKey: string) => {
-    return variables[rawKey] ?? '';
-  });
+  return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, rawKey: string) => variables[rawKey] ?? '');
 }
 
 async function loadTenantWhatsappConfig(tenantId: string, log: FastifyBaseLogger): Promise<TenantWhatsappConfig | null> {
@@ -86,9 +88,10 @@ async function loadTenantWhatsappConfig(tenantId: string, log: FastifyBaseLogger
 
   if (error) {
     if (error.message.includes('whatsapp_wuzapi_enabled')) {
-      log.warn({ tenantId }, 'Schema desatualizado para notificacoes WhatsApp via WuzAPI');
+      log.warn({ tenantId }, 'Schema desatualizado para notificacoes WhatsApp');
       return null;
     }
+
     log.error({ err: error, tenantId }, 'Erro ao carregar configuracao WhatsApp do tenant');
     return null;
   }
@@ -130,38 +133,24 @@ async function resolveProfessionalName(tenantId: string, professionalId?: string
 
 async function postTextMessage(
   baseUrl: string,
-  token: string,
+  apiKey: string,
+  instanceName: string,
   phone: string,
   message: string,
 ): Promise<Response> {
-  const url = `${normalizeWuzapiBaseUrl(baseUrl)}/chat/send/text`;
-
-  const payloads = [
-    { phone, message },
-    { number: phone, message },
-    { phone, text: message },
-    { chatId: `${phone}@s.whatsapp.net`, message },
-    { chatId: `${phone}@s.whatsapp.net`, text: message },
-  ];
-
-  let lastResponse: Response | null = null;
-  for (const payload of payloads) {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    lastResponse = response;
-    if (response.ok) {
-      return response;
-    }
-  }
-
-  return lastResponse ?? new Response('no_response', { status: 500 });
+  return fetch(`${normalizeEvolutionBaseUrl(baseUrl)}/message/sendText/${encodeURIComponent(instanceName)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: apiKey,
+    },
+    body: JSON.stringify({
+      number: phone,
+      text: message,
+      delay: 0,
+      linkPreview: false,
+    }),
+  });
 }
 
 export async function sendAppointmentCreatedWhatsapp(
@@ -171,8 +160,8 @@ export async function sendAppointmentCreatedWhatsapp(
   const config = await loadTenantWhatsappConfig(input.tenantId, log);
   if (!config || !config.enabled) return;
 
-  if (!env.WUZAPI_BASE_URL || !env.WUZAPI_TOKEN) {
-    log.warn({ tenantId: input.tenantId }, 'WuzAPI habilitado, mas URL/token internos nao configurados no backend');
+  if (!env.EVOLUTION_API_BASE_URL || !env.EVOLUTION_API_KEY) {
+    log.warn({ tenantId: input.tenantId }, 'Evolution API habilitada, mas URL/apikey internas nao configuradas no backend');
     return;
   }
 
@@ -200,7 +189,14 @@ export async function sendAppointmentCreatedWhatsapp(
   }
 
   try {
-    const response = await postTextMessage(env.WUZAPI_BASE_URL, env.WUZAPI_TOKEN, toPhone, message);
+    const response = await postTextMessage(
+      env.EVOLUTION_API_BASE_URL,
+      env.EVOLUTION_API_KEY,
+      getInstanceName(input.tenantId),
+      toPhone,
+      message,
+    );
+
     if (!response.ok) {
       const body = await response.text();
       log.error(
@@ -209,14 +205,14 @@ export async function sendAppointmentCreatedWhatsapp(
           status: response.status,
           body,
         },
-        'Falha ao enviar confirmacao de agendamento para WuzAPI',
+        'Falha ao enviar confirmacao de agendamento para Evolution API',
       );
       return;
     }
 
-    log.info({ tenantId: input.tenantId, toPhone }, 'Confirmacao de agendamento enviada via WuzAPI');
+    log.info({ tenantId: input.tenantId, toPhone }, 'Confirmacao de agendamento enviada via Evolution API');
   } catch (error) {
-    log.error({ err: error, tenantId: input.tenantId }, 'Erro inesperado no envio WhatsApp via WuzAPI');
+    log.error({ err: error, tenantId: input.tenantId }, 'Erro inesperado no envio WhatsApp via Evolution API');
   }
 }
 

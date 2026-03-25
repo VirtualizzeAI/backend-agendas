@@ -1,11 +1,8 @@
 import { FastifyInstance } from 'fastify';
+import QRCode from 'qrcode';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { getTenantIdFromQuery, requireAuthenticatedClient } from '../lib/request.js';
-
-function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
 
 const saveWhatsappConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -19,6 +16,16 @@ const connectWhatsappSchema = z.object({
 const syncWhatsappSchema = z.object({
   connectedNumber: z.string().min(8),
 });
+
+interface EvolutionResponse {
+  ok: boolean;
+  status: number;
+  payload: unknown;
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
 
 function onlyDigits(value?: string | null): string {
   return (value ?? '').replace(/\D/g, '');
@@ -37,21 +44,22 @@ function withoutBrazilCountryCode(value?: string | null): string {
   return digits;
 }
 
-function parseConnected(statusPayload: unknown): boolean {
+function getInstanceName(tenantId: string): string {
+  return `markei_${tenantId.replace(/-/g, '')}`;
+}
+
+function parseConnectedState(statusPayload: unknown): boolean {
   if (!statusPayload || typeof statusPayload !== 'object') return false;
-  const payload = statusPayload as { connected?: unknown; data?: unknown };
-  if (typeof payload.connected === 'boolean') {
-    return payload.connected;
-  }
+  const payload = statusPayload as { instance?: { state?: unknown } };
+  return payload.instance?.state === 'open';
+}
 
-  if (payload.data && typeof payload.data === 'object') {
-    const nestedConnected = (payload.data as { connected?: unknown }).connected;
-    if (typeof nestedConnected === 'boolean') {
-      return nestedConnected;
-    }
-  }
-
-  return false;
+function extractConnectionCode(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const response = payload as { code?: unknown; pairingCode?: unknown };
+  if (typeof response.code === 'string' && response.code.trim()) return response.code.trim();
+  if (typeof response.pairingCode === 'string' && response.pairingCode.trim()) return response.pairingCode.trim();
+  return null;
 }
 
 async function getTenantWhatsappConfig(supabase: any, tenantId: string) {
@@ -61,25 +69,34 @@ async function getTenantWhatsappConfig(supabase: any, tenantId: string) {
     .eq('id', tenantId)
     .maybeSingle();
 
-  if (error) {
-    return { error: error.message } as const;
-  }
+  if (error) return { error: error.message } as const;
+  if (!data) return { error: 'Tenant nao encontrado' } as const;
 
-  if (!data) {
-    return { error: 'Tenant nao encontrado' } as const;
-  }
-
-  return { data: data as { whatsapp_wuzapi_enabled?: boolean | null; whatsapp_wuzapi_connected_number?: string | null; whatsapp_confirmation_template?: string | null } } as const;
+  return {
+    data: data as {
+      whatsapp_wuzapi_enabled?: boolean | null;
+      whatsapp_wuzapi_connected_number?: string | null;
+      whatsapp_confirmation_template?: string | null;
+    },
+  } as const;
 }
 
-async function callWuzapi(baseUrl: string, token: string, path: string, method: 'GET' | 'POST') {
-  const response = await fetch(`${baseUrl}${path}`, {
+async function callEvolution(path: string, method: 'GET' | 'POST', body?: unknown): Promise<EvolutionResponse> {
+  if (!env.EVOLUTION_API_BASE_URL || !env.EVOLUTION_API_KEY) {
+    return {
+      ok: false,
+      status: 500,
+      payload: { message: 'EVOLUTION_API_BASE_URL e EVOLUTION_API_KEY devem estar configurados no backend' },
+    };
+  }
+
+  const response = await fetch(`${normalizeBaseUrl(env.EVOLUTION_API_BASE_URL)}${path}`, {
     method,
     headers: {
-      token,
+      apikey: env.EVOLUTION_API_KEY,
       'Content-Type': 'application/json',
     },
-    body: method === 'POST' ? '{}' : undefined,
+    body: body ? JSON.stringify(body) : undefined,
   });
 
   const text = await response.text();
@@ -93,11 +110,42 @@ async function callWuzapi(baseUrl: string, token: string, path: string, method: 
     }
   }
 
-  return {
-    ok: response.ok,
-    status: response.status,
-    payload,
-  };
+  return { ok: response.ok, status: response.status, payload };
+}
+
+async function fetchInstance(instanceName: string): Promise<unknown | null> {
+  const result = await callEvolution(`/instance/fetchInstances?instanceName=${encodeURIComponent(instanceName)}`, 'GET');
+  if (!result.ok || !Array.isArray(result.payload)) return null;
+
+  const match = result.payload.find((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const instance = (item as { instance?: { instanceName?: unknown } }).instance;
+    return instance?.instanceName === instanceName;
+  });
+
+  return match ?? null;
+}
+
+async function ensureInstance(instanceName: string, phoneNumber: string | null): Promise<EvolutionResponse> {
+  const existing = await fetchInstance(instanceName);
+  if (existing) return { ok: true, status: 200, payload: existing };
+
+  return callEvolution('/instance/create', 'POST', {
+    instanceName,
+    integration: 'WHATSAPP-BAILEYS',
+    qrcode: false,
+    number: phoneNumber,
+  });
+}
+
+async function saveConnectedNumber(supabase: any, tenantId: string, connectedNumber: string) {
+  const withCountryCode = withBrazilCountryCode(connectedNumber);
+  if (!withCountryCode) return;
+
+  await supabase
+    .from('tenants')
+    .update({ whatsapp_wuzapi_connected_number: withCountryCode })
+    .eq('id', tenantId);
 }
 
 export async function whatsappRoutes(app: FastifyInstance) {
@@ -154,25 +202,20 @@ export async function whatsappRoutes(app: FastifyInstance) {
     const tenantId = getTenantIdFromQuery(request, reply);
     if (!tenantId) return;
 
-    if (!env.WUZAPI_BASE_URL || !env.WUZAPI_TOKEN) {
-      return reply.code(500).send({ message: 'WUZAPI_BASE_URL e WUZAPI_TOKEN devem estar configurados no backend' });
-    }
-
+    const instanceName = getInstanceName(tenantId);
     const [{ data: tenantConfig }, result] = await Promise.all([
       auth.supabase
         .from('tenants')
         .select('whatsapp_wuzapi_connected_number')
         .eq('id', tenantId)
         .maybeSingle(),
-      callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/status', 'GET'),
+      callEvolution(`/instance/connectionState/${encodeURIComponent(instanceName)}`, 'GET'),
     ]);
 
-    if (!result.ok) {
-      return reply.code(400).send({ message: 'Falha ao consultar status da sessao', details: result.payload });
-    }
+    const connected = result.ok ? parseConnectedState(result.payload) : false;
 
     return reply.send({
-      connected: parseConnected(result.payload),
+      connected,
       connectedNumber: withoutBrazilCountryCode((tenantConfig as { whatsapp_wuzapi_connected_number?: string | null } | null)?.whatsapp_wuzapi_connected_number),
       status: result.payload,
     });
@@ -190,22 +233,34 @@ export async function whatsappRoutes(app: FastifyInstance) {
       return reply.code(400).send({ message: 'Payload invalido', issues: payload.error.issues });
     }
 
-    if (!env.WUZAPI_BASE_URL || !env.WUZAPI_TOKEN) {
-      return reply.code(500).send({ message: 'WUZAPI_BASE_URL e WUZAPI_TOKEN devem estar configurados no backend' });
+    const phoneNumber = withBrazilCountryCode(payload.data.connectedNumber);
+    if (!phoneNumber) {
+      return reply.code(400).send({ message: 'Numero invalido para conexao' });
     }
 
-    const connectResult = await callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/connect', 'POST');
+    const instanceName = getInstanceName(tenantId);
+    const ensureResult = await ensureInstance(instanceName, phoneNumber);
+    if (!ensureResult.ok) {
+      return reply.code(400).send({ message: 'Falha ao criar ou localizar instancia', details: ensureResult.payload });
+    }
+
+    const connectResult = await callEvolution(
+      `/instance/connect/${encodeURIComponent(instanceName)}?number=${encodeURIComponent(phoneNumber)}`,
+      'GET',
+    );
     if (!connectResult.ok) {
-      return reply.code(400).send({ message: 'Falha ao iniciar conexao da sessao', details: connectResult.payload });
+      return reply.code(400).send({ message: 'Falha ao conectar instancia', details: connectResult.payload });
     }
 
-    const qrResult = await callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/qr', 'GET');
-    if (!qrResult.ok) {
-      return reply.code(400).send({ message: 'Conexao iniciada, mas falhou ao obter QR', details: qrResult.payload });
+    const statusResult = await callEvolution(`/instance/connectionState/${encodeURIComponent(instanceName)}`, 'GET');
+    const connected = statusResult.ok ? parseConnectedState(statusResult.payload) : false;
+    const connectionCode = extractConnectionCode(connectResult.payload);
+
+    let qrCodeDataUrl: string | null = null;
+    if (!connected && connectionCode) {
+      qrCodeDataUrl = await QRCode.toDataURL(connectionCode, { margin: 1, width: 320 });
     }
 
-    const statusResult = await callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/status', 'GET');
-    const connected = statusResult.ok ? parseConnected(statusResult.payload) : false;
     if (connected) {
       await saveConnectedNumber(auth.supabase, tenantId, payload.data.connectedNumber);
     }
@@ -213,7 +268,9 @@ export async function whatsappRoutes(app: FastifyInstance) {
     return reply.send({
       message: connected ? 'Numero conectado com sucesso' : 'Conexao iniciada',
       connected,
-      qr: qrResult.payload,
+      qrCodeDataUrl,
+      pairingCode: (connectResult.payload as { pairingCode?: string } | null)?.pairingCode ?? null,
+      instanceName,
     });
   });
 
@@ -229,49 +286,14 @@ export async function whatsappRoutes(app: FastifyInstance) {
       return reply.code(400).send({ message: 'Payload invalido', issues: payload.error.issues });
     }
 
-    if (!env.WUZAPI_BASE_URL || !env.WUZAPI_TOKEN) {
-      return reply.code(500).send({ message: 'WUZAPI_BASE_URL e WUZAPI_TOKEN devem estar configurados no backend' });
-    }
+    const instanceName = getInstanceName(tenantId);
+    const result = await callEvolution(`/instance/connectionState/${encodeURIComponent(instanceName)}`, 'GET');
+    const connected = result.ok ? parseConnectedState(result.payload) : false;
 
-    const result = await callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/status', 'GET');
-    if (!result.ok) {
-      return reply.code(400).send({ message: 'Falha ao consultar status da sessao', details: result.payload });
-    }
-
-    const connected = parseConnected(result.payload);
     if (connected) {
       await saveConnectedNumber(auth.supabase, tenantId, payload.data.connectedNumber);
     }
 
     return reply.send({ connected, status: result.payload });
   });
-
-  app.get('/v1/whatsapp/session/qr', async (request, reply) => {
-    const auth = await requireAuthenticatedClient(request, reply);
-    if (!auth) return;
-
-    const tenantId = getTenantIdFromQuery(request, reply);
-    if (!tenantId) return;
-
-    if (!env.WUZAPI_BASE_URL || !env.WUZAPI_TOKEN) {
-      return reply.code(500).send({ message: 'WUZAPI_BASE_URL e WUZAPI_TOKEN devem estar configurados no backend' });
-    }
-
-    const result = await callWuzapi(normalizeBaseUrl(env.WUZAPI_BASE_URL), env.WUZAPI_TOKEN, '/session/qr', 'GET');
-    if (!result.ok) {
-      return reply.code(400).send({ message: 'Falha ao obter QR da sessao', details: result.payload });
-    }
-
-    return reply.send({ qr: result.payload });
-  });
-}
-
-async function saveConnectedNumber(supabase: any, tenantId: string, connectedNumber: string) {
-  const withCountryCode = withBrazilCountryCode(connectedNumber);
-  if (!withCountryCode) return;
-
-  await supabase
-    .from('tenants')
-    .update({ whatsapp_wuzapi_connected_number: withCountryCode })
-    .eq('id', tenantId);
 }
