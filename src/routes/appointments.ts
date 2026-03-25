@@ -14,7 +14,7 @@ const createAppointmentSchema = z.object({
   room: z.string().optional().nullable(),
   start_at: z.iso.datetime(),
   end_at: z.iso.datetime(),
-  status: z.enum(['confirmed', 'in-progress', 'attention', 'available']).default('confirmed'),
+  status: z.string().min(2).max(60).default('confirmed'),
   notes: z.string().optional().nullable(),
 });
 

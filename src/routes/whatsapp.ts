@@ -235,7 +235,7 @@ export async function whatsappRoutes(app: FastifyInstance) {
 
     const phoneNumber = withBrazilCountryCode(payload.data.connectedNumber);
     if (!phoneNumber) {
-      return reply.code(400).send({ message: 'Numero invalido para conexao' });
+      return reply.code(400).send({ message: 'Número invalido para Conexão' });
     }
 
     const instanceName = getInstanceName(tenantId);
@@ -266,7 +266,7 @@ export async function whatsappRoutes(app: FastifyInstance) {
     }
 
     return reply.send({
-      message: connected ? 'Numero conectado com sucesso' : 'Conexao iniciada',
+      message: connected ? 'Número conectado com sucesso' : 'Conexão iniciada',
       connected,
       qrCodeDataUrl,
       pairingCode: (connectResult.payload as { pairingCode?: string } | null)?.pairingCode ?? null,

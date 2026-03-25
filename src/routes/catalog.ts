@@ -50,6 +50,23 @@ const saveProfessionalSchedulesSchema = z.object({
 const updateClientSchema = createClientSchema.partial().omit({ tenant_id: true });
 const updateProfessionalSchema = createProfessionalSchema.partial().omit({ tenant_id: true });
 const updateServiceSchema = createServiceSchema.partial().omit({ tenant_id: true });
+const updateTenantSettingsSchema = z.object({
+  service_categories: z.array(z.string().min(1).max(60)).optional(),
+  appointment_statuses: z.array(z.string().min(1).max(60)).optional(),
+}).refine(
+  (value) => value.service_categories !== undefined || value.appointment_statuses !== undefined,
+  { message: 'Informe ao menos um campo para atualizar' },
+);
+
+const DEFAULT_SERVICE_CATEGORIES = ['podologia', 'estetica', 'unhas', 'terapia', 'pacote'];
+const DEFAULT_APPOINTMENT_STATUSES = ['confirmed', 'in-progress', 'attention', 'available'];
+
+function normalizeStringList(values: string[] | undefined, fallback: string[]) {
+  if (!values || values.length === 0) return fallback;
+
+  const unique = Array.from(new Set(values.map((item) => item.trim()).filter(Boolean)));
+  return unique.length > 0 ? unique : fallback;
+}
 
 function toMinute(time: string): number {
   const [h, m] = time.split(':');
@@ -57,6 +74,69 @@ function toMinute(time: string): number {
 }
 
 export async function catalogRoutes(app: FastifyInstance) {
+  app.get('/v1/tenant-settings', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const { supabase } = auth;
+    const { data, error } = await supabase
+      .from('tenant_settings')
+      .select('service_categories, appointment_statuses')
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(500).send({ message: error.message });
+    }
+
+    return {
+      service_categories: normalizeStringList(data?.service_categories as string[] | undefined, DEFAULT_SERVICE_CATEGORIES),
+      appointment_statuses: normalizeStringList(data?.appointment_statuses as string[] | undefined, DEFAULT_APPOINTMENT_STATUSES),
+    };
+  });
+
+  app.put('/v1/tenant-settings', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const payload = updateTenantSettingsSchema.safeParse(request.body ?? {});
+    if (!payload.success) {
+      return reply.code(400).send({ message: 'Payload invalido', issues: payload.error.issues });
+    }
+
+    const { supabase } = auth;
+
+    const serviceCategories = normalizeStringList(payload.data.service_categories, DEFAULT_SERVICE_CATEGORIES);
+    const appointmentStatuses = normalizeStringList(payload.data.appointment_statuses, DEFAULT_APPOINTMENT_STATUSES);
+
+    const { data, error } = await supabase
+      .from('tenant_settings')
+      .upsert({
+        tenant_id: tenantId,
+        service_categories: serviceCategories,
+        appointment_statuses: appointmentStatuses,
+      }, { onConflict: 'tenant_id' })
+      .select('service_categories, appointment_statuses')
+      .single();
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(400).send({ message: error.message });
+    }
+
+    return {
+      service_categories: normalizeStringList(data.service_categories as string[] | undefined, DEFAULT_SERVICE_CATEGORIES),
+      appointment_statuses: normalizeStringList(data.appointment_statuses as string[] | undefined, DEFAULT_APPOINTMENT_STATUSES),
+    };
+  });
+
   app.get('/v1/clients', async (request, reply) => {
     const auth = await requireAuthenticatedClient(request, reply);
     if (!auth) return;
