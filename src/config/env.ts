@@ -11,6 +11,15 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('*'),
   EVOLUTION_API_BASE_URL: z.string().url().optional(),
   EVOLUTION_API_KEY: z.string().min(1).optional(),
+  // SMTP
+  SMTP_HOST: z.string().min(1),
+  SMTP_PORT: z.string().default('587'),
+  SMTP_SECURE: z.string().default('false'),
+  SMTP_USER: z.string().min(1),
+  SMTP_PASS: z.string().min(1),
+  SMTP_FROM: z.string().min(1),
+  // App
+  APP_URL: z.string().url(),
 });
 
 const parsedEnv = envSchema.parse(process.env);
