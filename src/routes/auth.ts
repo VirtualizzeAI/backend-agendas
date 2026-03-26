@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { sendResetPasswordEmail } from '../lib/email.js';
-import { env } from '../config/env.js';
+import { env, isForgotPasswordEmailConfigured } from '../config/env.js';
 
 const forgotPasswordSchema = z.object({
   email: z.string().email(),
@@ -13,6 +13,13 @@ export async function authRoutes(app: FastifyInstance) {
     try {
       const { email } = forgotPasswordSchema.parse(request.body ?? {});
       const normalizedEmail = email.trim().toLowerCase();
+
+      if (!isForgotPasswordEmailConfigured()) {
+        request.log.warn({
+          msg: 'Forgot password desabilitado: variáveis SMTP/APP_URL incompletas',
+        });
+        return { ok: true };
+      }
 
       // Gera o link de recuperação usando a Admin API do Supabase
       const { data, error } = await supabaseAdmin.auth.admin.generateLink({

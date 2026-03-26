@@ -11,15 +11,15 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('*'),
   EVOLUTION_API_BASE_URL: z.string().url().optional(),
   EVOLUTION_API_KEY: z.string().min(1).optional(),
-  // SMTP
-  SMTP_HOST: z.string().min(1),
+  // SMTP (opcional no boot; validado em runtime na rota de forgot-password)
+  SMTP_HOST: z.string().min(1).optional(),
   SMTP_PORT: z.string().default('587'),
   SMTP_SECURE: z.string().default('false'),
-  SMTP_USER: z.string().min(1),
-  SMTP_PASS: z.string().min(1),
-  SMTP_FROM: z.string().min(1),
-  // App
-  APP_URL: z.string().url(),
+  SMTP_USER: z.string().min(1).optional(),
+  SMTP_PASS: z.string().min(1).optional(),
+  SMTP_FROM: z.string().min(1).optional(),
+  // App (opcional no boot; validado em runtime na rota de forgot-password)
+  APP_URL: z.string().url().optional(),
 });
 
 const parsedEnv = envSchema.parse(process.env);
@@ -34,3 +34,13 @@ export const env = {
         .map((origin) => origin.trim())
         .filter(Boolean),
 };
+
+export function isForgotPasswordEmailConfigured() {
+  return Boolean(
+    env.SMTP_HOST
+    && env.SMTP_USER
+    && env.SMTP_PASS
+    && env.SMTP_FROM
+    && env.APP_URL,
+  );
+}

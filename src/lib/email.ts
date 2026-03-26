@@ -1,15 +1,21 @@
 import nodemailer, { SentMessageInfo } from 'nodemailer';
-import { env } from '../config/env.js';
+import { env, isForgotPasswordEmailConfigured } from '../config/env.js';
 
-const transporter = nodemailer.createTransport({
-  host: env.SMTP_HOST,
-  port: Number(env.SMTP_PORT),
-  secure: env.SMTP_SECURE === 'true',
-  auth: {
-    user: env.SMTP_USER,
-    pass: env.SMTP_PASS,
-  },
-});
+function getTransporter() {
+  if (!isForgotPasswordEmailConfigured()) {
+    throw new Error('forgot_password_email_not_configured');
+  }
+
+  return nodemailer.createTransport({
+    host: env.SMTP_HOST,
+    port: Number(env.SMTP_PORT),
+    secure: env.SMTP_SECURE === 'true',
+    auth: {
+      user: env.SMTP_USER,
+      pass: env.SMTP_PASS,
+    },
+  });
+}
 
 export async function sendResetPasswordEmail(to: string, resetLink: string): Promise<SentMessageInfo> {
   const html = `
@@ -83,6 +89,8 @@ export async function sendResetPasswordEmail(to: string, resetLink: string): Pro
   </table>
 </body>
 </html>`;
+
+  const transporter = getTransporter();
 
   return transporter.sendMail({
     from: env.SMTP_FROM,
