@@ -4,6 +4,8 @@ import { getTenantIdFromQuery, requireAuthenticatedClient } from '../lib/request
 import { supabaseAdmin } from '../lib/supabase.js';
 import { sendAppointmentCreatedWhatsapp } from '../lib/whatsapp.js';
 
+const BOOKING_TIME_ZONE = 'America/Sao_Paulo';
+
 const slotQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   professionalId: z.uuid(),
@@ -43,9 +45,49 @@ function randomSlug(size = 20) {
   return out;
 }
 
-function toMinuteOfDay(dateIso: string): number {
-  const d = new Date(dateIso);
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
+function getDateTimePartsInTimeZone(dateIso: string, timeZone: string): {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+} {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+
+  const part = formatter.formatToParts(new Date(dateIso));
+  const pick = (type: string) => part.find((item) => item.type === type)?.value ?? '00';
+
+  return {
+    year: pick('year'),
+    month: pick('month'),
+    day: pick('day'),
+    hour: pick('hour'),
+    minute: pick('minute'),
+  };
+}
+
+function toLocalDateKey(dateIso: string, timeZone: string): string {
+  const part = getDateTimePartsInTimeZone(dateIso, timeZone);
+  return `${part.year}-${part.month}-${part.day}`;
+}
+
+function toMinuteOfDay(dateIso: string, timeZone: string): number {
+  const part = getDateTimePartsInTimeZone(dateIso, timeZone);
+  return Number(part.hour) * 60 + Number(part.minute);
+}
+
+function addDaysToIsoDate(date: string, delta: number): string {
+  const ref = new Date(`${date}T00:00:00.000Z`);
+  ref.setUTCDate(ref.getUTCDate() + delta);
+  return ref.toISOString().slice(0, 10);
 }
 
 function parseLocalDate(date: string): Date {
@@ -72,6 +114,15 @@ function normalizeDigits(value?: string | null): string | null {
   if (!value) return null;
   const digits = value.replace(/\D/g, '');
   return digits.length > 0 ? digits : null;
+}
+
+function getExpandedUtcRangeForLocalDate(date: string): { fromIso: string; toIso: string } {
+  const fromDate = addDaysToIsoDate(date, -1);
+  const toDate = addDaysToIsoDate(date, 1);
+  return {
+    fromIso: `${fromDate}T00:00:00.000Z`,
+    toIso: `${toDate}T23:59:59.999Z`,
+  };
 }
 
 export async function publicBookingRoutes(app: FastifyInstance) {
@@ -267,16 +318,15 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     if (!resolvedServiceDurationMinutes) {
       resolvedServiceDurationMinutes = 30;
     }
-    const dayStart = `${date}T00:00:00.000Z`;
-    const dayEnd = `${date}T23:59:59.999Z`;
+    const range = getExpandedUtcRangeForLocalDate(date);
 
     const { data: appointments, error: apptError } = await supabaseAdmin
       .from('appointments')
       .select('start_at, end_at')
       .eq('tenant_id', link.tenant_id)
       .eq('professional_id', professionalId)
-      .gte('start_at', dayStart)
-      .lte('start_at', dayEnd)
+      .gte('start_at', range.fromIso)
+      .lte('start_at', range.toIso)
       .order('start_at', { ascending: true });
 
     if (apptError) {
@@ -324,10 +374,12 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     const minBookingNoticeMinutes = scheduleSettings?.min_booking_notice_minutes ?? 0;
     const nowRef = new Date();
 
-    const occupied = (appointments ?? []).map((item) => ({
-      start: toMinuteOfDay(item.start_at),
-      end: toMinuteOfDay(item.end_at),
-    }));
+    const occupied = (appointments ?? [])
+      .filter((item) => toLocalDateKey(item.start_at, BOOKING_TIME_ZONE) === date)
+      .map((item) => ({
+        start: toMinuteOfDay(item.start_at, BOOKING_TIME_ZONE),
+        end: toMinuteOfDay(item.end_at, BOOKING_TIME_ZONE),
+      }));
 
     const slots: Array<{ value: string; label: string }> = [];
     const seen = new Set<string>();
@@ -433,29 +485,32 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     }
 
     const endDate = new Date(startDate.getTime() + totalDurationMinutes * 60 * 1000);
-    const datePart = payload.startAt.slice(0, 10);
-    const dayStart = `${datePart}T00:00:00.000Z`;
-    const dayEnd = `${datePart}T23:59:59.999Z`;
+    const datePart = toLocalDateKey(payload.startAt, BOOKING_TIME_ZONE);
+    const range = getExpandedUtcRangeForLocalDate(datePart);
 
     const { data: dayAppointments, error: dayAppointmentsError } = await supabaseAdmin
       .from('appointments')
       .select('start_at, end_at')
       .eq('tenant_id', link.tenant_id)
       .eq('professional_id', payload.professionalId)
-      .gte('start_at', dayStart)
-      .lte('start_at', dayEnd);
+      .gte('start_at', range.fromIso)
+      .lte('start_at', range.toIso);
 
     if (dayAppointmentsError) {
       request.log.error(dayAppointmentsError);
       return reply.code(500).send({ message: dayAppointmentsError.message });
     }
 
-    const startMinutes = toMinuteOfDay(payload.startAt);
-    const endMinutes = toMinuteOfDay(endDate.toISOString());
+    const startMinutes = toMinuteOfDay(payload.startAt, BOOKING_TIME_ZONE);
+    const endMinutes = toMinuteOfDay(endDate.toISOString(), BOOKING_TIME_ZONE);
 
     const hasConflict = (dayAppointments ?? []).some((row) => {
-      const rowStart = toMinuteOfDay(row.start_at);
-      const rowEnd = toMinuteOfDay(row.end_at);
+      if (toLocalDateKey(row.start_at, BOOKING_TIME_ZONE) !== datePart) {
+        return false;
+      }
+
+      const rowStart = toMinuteOfDay(row.start_at, BOOKING_TIME_ZONE);
+      const rowEnd = toMinuteOfDay(row.end_at, BOOKING_TIME_ZONE);
       return startMinutes < rowEnd && endMinutes > rowStart;
     });
 

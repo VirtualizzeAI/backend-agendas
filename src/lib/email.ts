@@ -17,6 +17,20 @@ function getTransporter() {
   });
 }
 
+export async function testSmtpConnection(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const transporter = getTransporter();
+    await transporter.verify();
+    return { ok: true };
+  } catch (error) {
+    const err = error as Error;
+    return {
+      ok: false,
+      error: err.message,
+    };
+  }
+}
+
 export async function sendResetPasswordEmail(to: string, resetLink: string): Promise<SentMessageInfo> {
   const html = `
 <!DOCTYPE html>
