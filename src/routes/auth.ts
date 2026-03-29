@@ -102,7 +102,10 @@ export async function authRoutes(app: FastifyInstance) {
         });
       }
 
-      const resetLink = data.properties.action_link;
+      const tokenHash = data.properties.hashed_token;
+      const resetLink = tokenHash
+        ? `${env.APP_URL}/nova-senha?token_hash=${encodeURIComponent(tokenHash)}&type=recovery`
+        : data.properties.action_link;
       request.log.info({ msg: 'Link de recuperação gerado', to: normalizedEmail });
 
       try {

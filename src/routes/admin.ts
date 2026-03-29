@@ -3,6 +3,8 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { requireAuthenticatedClient } from '../lib/request.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { sendResetPasswordEmail } from '../lib/email.js';
+import { env, isForgotPasswordEmailConfigured } from '../config/env.js';
 
 interface AuthUserRow {
   id: string;
@@ -445,10 +447,37 @@ export async function adminRoutes(app: FastifyInstance) {
       return reply.code(400).send({ message: 'Cliente sem e-mail SaaS cadastrado' });
     }
 
-    const resetResult = await supabaseAdmin.auth.resetPasswordForEmail(customer.saas_email);
-    if (resetResult.error) {
-      request.log.error(resetResult.error);
-      return reply.code(400).send({ message: resetResult.error.message });
+    if (!isForgotPasswordEmailConfigured()) {
+      request.log.warn({ msg: 'Reset admin desabilitado: variáveis SMTP/APP_URL incompletas' });
+      return reply.code(503).send({ message: 'Serviço de recuperação de senha não está configurado no servidor.' });
+    }
+
+    const normalizedEmail = customer.saas_email.trim().toLowerCase();
+
+    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'recovery',
+      email: normalizedEmail,
+      options: {
+        redirectTo: `${env.APP_URL}/nova-senha`,
+      },
+    });
+
+    if (linkError) {
+      request.log.error({ msg: 'Supabase generateLink falhou no reset admin', error: linkError.message, status: linkError.status });
+      return reply.code(400).send({ message: linkError.message });
+    }
+
+    const tokenHash = linkData.properties.hashed_token;
+    const resetLink = tokenHash
+      ? `${env.APP_URL}/nova-senha?token_hash=${encodeURIComponent(tokenHash)}&type=recovery`
+      : linkData.properties.action_link;
+
+    try {
+      await sendResetPasswordEmail(normalizedEmail, resetLink);
+    } catch (error) {
+      const err = error as Error;
+      request.log.error({ msg: 'Falha SMTP no reset admin', email: normalizedEmail, error: err.message });
+      return reply.code(502).send({ message: 'Falha ao enviar e-mail de recuperação.' });
     }
 
     return { sent: true };

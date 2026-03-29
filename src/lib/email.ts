@@ -52,7 +52,7 @@ export async function sendResetPasswordEmail(to: string, resetLink: string): Pro
           <!-- Header -->
           <tr>
             <td style="background:linear-gradient(135deg,#23c3ae 0%,#129689 100%);padding:32px 40px;text-align:center;">
-              <p style="margin:0;font-size:28px;font-weight:700;color:#ffffff;letter-spacing:-0.5px;">📅 Markei</p>
+              <p style="margin:0;font-size:28px;font-weight:700;color:#ffffff;letter-spacing:-0.5px;">App Markei</p>
             </td>
           </tr>
 
