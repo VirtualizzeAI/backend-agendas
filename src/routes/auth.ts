@@ -79,7 +79,10 @@ export async function authRoutes(app: FastifyInstance) {
 
       if (!isForgotPasswordEmailConfigured()) {
         request.log.warn({ msg: 'Forgot password desabilitado: variáveis SMTP/APP_URL incompletas' });
-        return { ok: true };
+        return reply.code(503).send({
+          ok: false,
+          message: 'Serviço de recuperação de senha não está configurado no servidor.',
+        });
       }
 
       // Gera o link de recuperação via Supabase Admin API
@@ -93,31 +96,55 @@ export async function authRoutes(app: FastifyInstance) {
 
       if (error) {
         request.log.error({ msg: 'Supabase generateLink falhou', error: error.message, status: error.status });
-        return { ok: true };
+        return reply.code(400).send({
+          ok: false,
+          message: 'Email não encontrado ou erro ao gerar link de recuperação.',
+        });
       }
 
       const resetLink = data.properties.action_link;
       request.log.info({ msg: 'Link de recuperação gerado', to: normalizedEmail });
 
-      const result = await sendResetPasswordEmail(normalizedEmail, resetLink);
+      try {
+        const result = await sendResetPasswordEmail(normalizedEmail, resetLink);
 
-      request.log.info({
-        msg: 'E-mail enviado via SMTP',
-        to: normalizedEmail,
-        messageId: result.messageId,
-        accepted: result.accepted,
-        rejected: result.rejected,
-      });
+        request.log.info({
+          msg: 'E-mail enviado via SMTP',
+          to: normalizedEmail,
+          messageId: result.messageId,
+          accepted: result.accepted,
+          rejected: result.rejected,
+        });
 
-      return { ok: true };
+        return reply.code(200).send({
+          ok: true,
+          message: 'Se este e-mail estiver cadastrado, você receberá as instruções em breve.',
+        });
+      } catch (emailError) {
+        const err = emailError as Error;
+        request.log.error({
+          msg: 'Falha ao enviar e-mail de recuperação',
+          to: normalizedEmail,
+          error: err.message,
+        });
+        return reply.code(502).send({
+          ok: false,
+          message: 'Falha ao enviar e-mail. Tente novamente mais tarde.',
+          error: err.message,
+        });
+      }
     } catch (error) {
       if (error instanceof z.ZodError) {
-        return reply.code(400).send({ message: 'E-mail inválido', issues: error.issues });
+        return reply.code(400).send({ ok: false, message: 'E-mail inválido', issues: error.issues });
       }
 
       const err = error as Error;
       request.log.error({ msg: 'Erro em /v1/auth/forgot-password', error: err.message, stack: err.stack });
-      return { ok: true };
+      return reply.code(500).send({
+        ok: false,
+        message: 'Erro ao processar solicitação.',
+        error: err.message,
+      });
     }
   });
 }
