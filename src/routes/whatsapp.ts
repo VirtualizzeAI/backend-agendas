@@ -81,7 +81,7 @@ async function getTenantWhatsappConfig(supabase: any, tenantId: string) {
   } as const;
 }
 
-async function callEvolution(path: string, method: 'GET' | 'POST', body?: unknown): Promise<EvolutionResponse> {
+async function callEvolution(path: string, method: 'GET' | 'POST' | 'DELETE', body?: unknown): Promise<EvolutionResponse> {
   if (!env.EVOLUTION_API_BASE_URL || !env.EVOLUTION_API_KEY) {
     return {
       ok: false,
@@ -306,5 +306,23 @@ export async function whatsappRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ connected, status: result.payload });
+  });
+
+  app.post('/v1/whatsapp/session/disconnect', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const instanceName = getInstanceName(tenantId);
+    await callEvolution(`/instance/logout/${encodeURIComponent(instanceName)}`, 'DELETE');
+
+    await auth.supabase
+      .from('tenants')
+      .update({ whatsapp_wuzapi_connected_number: null })
+      .eq('id', tenantId);
+
+    return reply.send({ ok: true, message: 'Número desconectado com sucesso' });
   });
 }
