@@ -90,12 +90,17 @@ async function callEvolution(path: string, method: 'GET' | 'POST' | 'DELETE', bo
     };
   }
 
+  const headers: Record<string, string> = {
+    apikey: env.EVOLUTION_API_KEY,
+  };
+
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const response = await fetch(`${normalizeBaseUrl(env.EVOLUTION_API_BASE_URL)}${path}`, {
     method,
-    headers: {
-      apikey: env.EVOLUTION_API_KEY,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
