@@ -130,12 +130,23 @@ async function ensureInstance(instanceName: string, phoneNumber: string | null):
   const existing = await fetchInstance(instanceName);
   if (existing) return { ok: true, status: 200, payload: existing };
 
-  return callEvolution('/instance/create', 'POST', {
+  const createResult = await callEvolution('/instance/create', 'POST', {
     instanceName,
     integration: 'WHATSAPP-BAILEYS',
     qrcode: false,
     number: phoneNumber,
   });
+
+  // Se a API retornar 403 "already in use", a instância já existe mas fetchInstance
+  // não a encontrou (pode ocorrer em estados de reconexão). Trata como sucesso.
+  if (!createResult.ok && createResult.status === 403) {
+    const body = JSON.stringify(createResult.payload ?? '').toLowerCase();
+    if (body.includes('already in use')) {
+      return { ok: true, status: 200, payload: createResult.payload };
+    }
+  }
+
+  return createResult;
 }
 
 async function saveConnectedNumber(supabase: any, tenantId: string, connectedNumber: string) {
