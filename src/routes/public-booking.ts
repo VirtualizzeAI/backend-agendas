@@ -116,6 +116,14 @@ function normalizeDigits(value?: string | null): string | null {
   return digits.length > 0 ? digits : null;
 }
 
+function normalizeName(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 function getExpandedUtcRangeForLocalDate(date: string): { fromIso: string; toIso: string } {
   const fromDate = addDaysToIsoDate(date, -1);
   const toDate = addDaysToIsoDate(date, 1);
@@ -522,17 +530,27 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     const phoneDigits = normalizeDigits(payload.clientPhone);
 
     let clientId: string | null = null;
+    let canonicalClientName = payload.clientName.trim();
 
     if (cpfDigits) {
       const { data: foundByCpf } = await supabaseAdmin
         .from('clients')
-        .select('id')
+        .select('id, name')
         .eq('tenant_id', link.tenant_id)
         .eq('cpf', cpfDigits)
         .limit(1)
         .maybeSingle();
 
-      clientId = foundByCpf?.id ?? null;
+      if (foundByCpf) {
+        if (normalizeName(foundByCpf.name) !== normalizeName(payload.clientName)) {
+          return reply.code(409).send({
+            message: 'Este CPF já está cadastrado com outro nome. Corrija o nome ou CPF.',
+          });
+        }
+
+        clientId = foundByCpf.id;
+        canonicalClientName = foundByCpf.name;
+      }
     }
 
     if (!clientId && phoneDigits) {
@@ -576,7 +594,7 @@ export async function publicBookingRoutes(app: FastifyInstance) {
         client_id: clientId,
         professional_id: payload.professionalId,
         service_id: services[0]?.id ?? null,
-        client_name: payload.clientName.trim(),
+        client_name: canonicalClientName,
         service_name: serviceSummary,
         start_at: startDate.toISOString(),
         end_at: endDate.toISOString(),
@@ -596,7 +614,7 @@ export async function publicBookingRoutes(app: FastifyInstance) {
     await sendAppointmentCreatedWhatsapp(
       {
         tenantId: link.tenant_id,
-        clientName: payload.clientName.trim(),
+        clientName: canonicalClientName,
         clientPhone: phoneDigits ?? payload.clientPhone,
         serviceName: serviceSummary,
         startAtIso: createdAppointment.start_at,
