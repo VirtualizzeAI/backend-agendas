@@ -17,11 +17,16 @@ const createClientSchema = z.object({
 const createProfessionalSchema = z.object({
   tenant_id: z.uuid(),
   name: z.string().min(2),
-  specialty: z.string().min(2),
+  specialty: z.string().max(80).default(''),
   short_name: z.string().min(1),
   phone: z.string().optional().nullable(),
   commission_rate: z.number().min(0).max(100).default(0),
   active: z.boolean().default(true),
+});
+
+const createProfessionalSpecialtySchema = z.object({
+  tenant_id: z.uuid(),
+  name: z.string().min(2).max(80),
 });
 
 const createServiceSchema = z.object({
@@ -71,6 +76,34 @@ function normalizeStringList(values: string[] | undefined, fallback: string[]) {
 function toMinute(time: string): number {
   const [h, m] = time.split(':');
   return Number(h) * 60 + Number(m);
+}
+
+function normalizeSpecialtyName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+async function upsertProfessionalSpecialty(
+  supabase: any,
+  tenantId: string,
+  specialtyName: string,
+) {
+  const name = specialtyName.trim();
+  if (!name) return;
+
+  const { error } = await supabase
+    .from('professional_specialties')
+    .upsert(
+      {
+        tenant_id: tenantId,
+        name,
+        normalized_name: normalizeSpecialtyName(name),
+      },
+      { onConflict: 'tenant_id,normalized_name' },
+    );
+
+  if (error) {
+    throw error;
+  }
 }
 
 export async function catalogRoutes(app: FastifyInstance) {
@@ -201,6 +234,84 @@ export async function catalogRoutes(app: FastifyInstance) {
     return { records: data ?? [] };
   });
 
+  app.get('/v1/professionals/specialties', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const { supabase } = auth;
+    const { data, error } = await supabase
+      .from('professional_specialties')
+      .select('id, tenant_id, name, normalized_name, created_at, updated_at')
+      .eq('tenant_id', tenantId)
+      .order('name', { ascending: true });
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(500).send({ message: error.message });
+    }
+
+    return { records: data ?? [] };
+  });
+
+  app.post('/v1/professionals/specialties', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const payload = createProfessionalSpecialtySchema.safeParse(request.body ?? {});
+    if (!payload.success) {
+      return reply.code(400).send({ message: 'Payload invalido', issues: payload.error.issues });
+    }
+
+    const { supabase } = auth;
+    const normalizedName = normalizeSpecialtyName(payload.data.name);
+
+    const { data, error } = await supabase
+      .from('professional_specialties')
+      .upsert(
+        {
+          tenant_id: payload.data.tenant_id,
+          name: payload.data.name.trim(),
+          normalized_name: normalizedName,
+        },
+        { onConflict: 'tenant_id,normalized_name' },
+      )
+      .select('id, tenant_id, name, normalized_name, created_at, updated_at')
+      .single();
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(400).send({ message: error.message });
+    }
+
+    return reply.code(201).send(data);
+  });
+
+  app.delete('/v1/professionals/specialties/:id', async (request, reply) => {
+    const auth = await requireAuthenticatedClient(request, reply);
+    if (!auth) return;
+
+    const tenantId = getTenantIdFromQuery(request, reply);
+    if (!tenantId) return;
+
+    const { id } = request.params as { id: string };
+    const { supabase } = auth;
+    const { error } = await supabase
+      .from('professional_specialties')
+      .delete()
+      .eq('id', id)
+      .eq('tenant_id', tenantId);
+
+    if (error) {
+      request.log.error(error);
+      return reply.code(400).send({ message: error.message });
+    }
+
+    return reply.code(204).send();
+  });
+
   app.post('/v1/professionals', async (request, reply) => {
     const auth = await requireAuthenticatedClient(request, reply);
     if (!auth) return;
@@ -211,6 +322,13 @@ export async function catalogRoutes(app: FastifyInstance) {
     }
 
     const { supabase } = auth;
+    try {
+      await upsertProfessionalSpecialty(supabase, payload.data.tenant_id, payload.data.specialty);
+    } catch (error) {
+      request.log.error(error);
+      return reply.code(400).send({ message: 'Nao foi possivel sincronizar a especialidade.' });
+    }
+
     const { data, error } = await supabase.from('professionals').insert(payload.data).select('*').single();
 
     if (error) {
@@ -328,6 +446,13 @@ export async function catalogRoutes(app: FastifyInstance) {
     if (error) {
       request.log.error(error);
       return reply.code(400).send({ message: error.message });
+    }
+
+    try {
+      await upsertProfessionalSpecialty(supabase, data.tenant_id as string, data.specialty as string);
+    } catch (syncError) {
+      request.log.error(syncError);
+      return reply.code(400).send({ message: 'Profissional atualizado, mas falhou ao sincronizar especialidade.' });
     }
 
     return data;
